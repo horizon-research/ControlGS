@@ -1,0 +1,39 @@
+{
+  "lens_file": "google_cardboard_rgb.ZMX",
+  "field": {
+    "x_range": [
+      -12,
+      12
+    ],
+    "y_range": [
+      -12,
+      12
+    ],
+    "x_points": 29,
+    "y_points": 29,
+    "sample_mode": "downstream"
+  },
+  "psf": {
+    "sampling": "64x64",
+    "image_size_mm": 50,
+    "n_rays": 2000000,
+    "n_wavelengths": 3
+  },
+  "output": {
+    "dir": "psf_geometric_scan",
+    "save_aggregate_npy": true,
+    "save_dataset_npz": true,
+    "save_grid_png": true,
+    "save_chief_ray_png": true
+  },
+  "visualization": {
+    "normalize_per_channel": true,
+    "log_gain": null,
+    "gamma": 0.7,
+    "tile_upscale": 1,
+    "tile_border": 0,
+    "flip_x": false,
+    "flip_y": false,
+    "rotate_deg": 0
+  }
+}

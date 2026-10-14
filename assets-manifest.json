@@ -1,0 +1,14 @@
+{
+  "files": [
+    {
+      "path": "optics/psf_geometric_scan/psf_dataset_downstream.npz",
+      "bytes": 88555114,
+      "sha256": "b861f0d74c55880068c98ad84539b053052858d3da10b632ee22b9447a5fd4b5"
+    },
+    {
+      "path": "optics/psf_geometric_scan/wave_info.txt",
+      "bytes": 1495,
+      "sha256": "2df3669ad4d3ebbcb26a433a68bb3fbf88bcb559fbc0ede66388e2008278f051"
+    }
+  ]
+}

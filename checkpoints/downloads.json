@@ -1,0 +1,27 @@
+{
+  "version": "2026-10-14",
+  "folder_url": "https://drive.google.com/drive/folders/1WSmc7E38Da3KMjVs7HL9kuu_Jzrhp8kC",
+  "bundles": {
+    "materials": {
+      "file": "controlgs-materials-20261014.tar.gz",
+      "bytes": 38351865,
+      "sha256": "45a17a614995bf949897478097fa550408940f96daf77633e1c6483ecd0e3855",
+      "google_drive_id": "1J8d9qYXojiBH3LVVpz3CHQH8qJhh864r",
+      "url": "https://drive.google.com/file/d/1J8d9qYXojiBH3LVVpz3CHQH8qJhh864r/view?usp=drivesdk"
+    },
+    "stump": {
+      "file": "controlgs-stump-20261014.tar.gz",
+      "bytes": 488687749,
+      "sha256": "fc0fdf9a64dea311c4b6e2aaf1a12cbbe530fc5f6a750e61d32009934caa601d",
+      "google_drive_id": "1TqNOpgyg7ahx-zZG6u7adp824aJVSxF3",
+      "url": "https://drive.google.com/file/d/1TqNOpgyg7ahx-zZG6u7adp824aJVSxF3/view?usp=drivesdk"
+    },
+    "optics": {
+      "file": "controlgs-psf-20261014.tar.gz",
+      "bytes": 3187166,
+      "sha256": "82a2e01263b0b92b4ab4647c0839d2f04e892baa8bff9c3e1cff5d1535900daf",
+      "google_drive_id": "13fnzSELj1yot4Y1M16_2mIflM1liFDw2",
+      "url": "https://drive.google.com/file/d/13fnzSELj1yot4Y1M16_2mIflM1liFDw2/view?usp=drivesdk"
+    }
+  }
+}

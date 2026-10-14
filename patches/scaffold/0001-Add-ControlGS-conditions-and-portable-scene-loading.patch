@@ -1,0 +1,814 @@
+From ea1e238763c627680ca08d015bea2686f32690ee Mon Sep 17 00:00:00 2001
+From: ControlGS Contributors <controlgs@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 13:10:32 -0400
+Subject: [PATCH 1/2] Add ControlGS conditions and portable scene loading
+
+---
+ arguments/__init__.py         |   2 +-
+ gaussian_renderer/__init__.py | 203 ++++++++++++++++++++++++++--------
+ scene/dataset_readers.py      |   6 +-
+ scene/gaussian_model.py       | 194 ++++++++++++++++++++++++++++++--
+ utils/camera_utils.py         |  28 +++--
+ utils/general_utils.py        |  18 ++-
+ 6 files changed, 383 insertions(+), 68 deletions(-)
+
+diff --git a/arguments/__init__.py b/arguments/__init__.py
+index 5621002..e667ba4 100755
+--- a/arguments/__init__.py
++++ b/arguments/__init__.py
+@@ -75,7 +75,7 @@ class ModelParams(ParamGroup):
+         self.add_opacity_dist = False
+         self.add_cov_dist = False
+         self.add_color_dist = False
+-        
++
+         super().__init__(parser, "Loading Parameters", sentinel)
+ 
+     def extract(self, args):
+diff --git a/gaussian_renderer/__init__.py b/gaussian_renderer/__init__.py
+index 3982888..885e57f 100755
+--- a/gaussian_renderer/__init__.py
++++ b/gaussian_renderer/__init__.py
+@@ -9,12 +9,126 @@
+ # For inquiries contact  george.drettakis@inria.fr
+ #
+ import torch
++import torch.nn.functional as F
+ from einops import repeat
+ 
+ import math
+ from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+ from scene.gaussian_model import GaussianModel
+ 
++
++def make_raster_settings(viewpoint_camera, bg_color, scaling_modifier, pipe):
++    tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
++    tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
++    kwargs = dict(
++        image_height=int(viewpoint_camera.image_height),
++        image_width=int(viewpoint_camera.image_width),
++        tanfovx=tanfovx,
++        tanfovy=tanfovy,
++        bg=bg_color,
++        scale_modifier=scaling_modifier,
++        viewmatrix=viewpoint_camera.world_view_transform,
++        projmatrix=viewpoint_camera.full_proj_transform,
++        sh_degree=1,
++        campos=viewpoint_camera.camera_center,
++        prefiltered=False,
++        debug=pipe.debug,
++    )
++    return GaussianRasterizationSettings(**kwargs)
++
++def append_res_condition(features, viewpoint_camera, pc, visible_mask=None):
++    return features
++
++def get_lens_condition_alpha(viewpoint_camera, anchor, features):
++    projection = viewpoint_camera.full_proj_transform.to(dtype=features.dtype, device=features.device)
++    anchor_h = torch.cat(
++        [
++            anchor.to(dtype=features.dtype, device=features.device),
++            torch.ones((anchor.shape[0], 1), dtype=features.dtype, device=features.device),
++        ],
++        dim=1,
++    )
++    projected = anchor_h @ projection
++    w = projected[:, 3:4]
++    eps = torch.full_like(w, 1e-7)
++    w_safe = torch.where(w.abs() < eps, eps, w)
++    ndc_xy = projected[:, :2] / w_safe
++
++    # Match the square-padded image coordinates used by the lens pipeline.
++    # For square images this is raw NDC; for rectangular images the shorter
++    # axis is compressed exactly as `pad_to_square` would place it.
++    width = int(viewpoint_camera.image_width)
++    height = int(viewpoint_camera.image_height)
++    side = max(width, height)
++    denom = max(side - 1, 1)
++    axis_scale = torch.tensor(
++        [max(width - 1, 1) / denom, max(height - 1, 1) / denom],
++        dtype=features.dtype,
++        device=features.device,
++    )
++    square_xy = ndc_xy * axis_scale
++    radius = torch.linalg.norm(square_xy, dim=1, keepdim=True)
++    radius_max = float(getattr(viewpoint_camera, "lens_condition_radius_max_norm", math.sqrt(2.0)))
++    fixed_alpha = getattr(viewpoint_camera, "xrgs_fixed_lens_alpha", None)
++    if fixed_alpha is not None:
++        value = torch.as_tensor(fixed_alpha, dtype=features.dtype, device=features.device)
++        value = value.reshape(-1)[0].clamp(0.0, 1.0)
++        return (torch.ones_like(radius) * value).detach()
++    return torch.clamp(radius / max(radius_max, 1e-6), 0.0, 1.0).detach()
++
++def prepare_res_condition_plugin(pc, viewpoint_camera, features, visible_mask):
++    if not pc.uses_res_cond_plugin():
++        return None
++    if visible_mask is None:
++        raise ValueError("Unified plug-in condition requires visible_mask")
++    if getattr(pc, "res_cond_mode", "scalar") != "learned_anchor_multi_plugin":
++        raise ValueError(f"Unsupported res_cond_mode for XRGS unified path: {pc.res_cond_mode}")
++    res_cond_anchor = pc._res_cond_anchor[visible_mask].to(dtype=features.dtype, device=features.device)
++    layout = getattr(pc, "res_cond_plugin_layout", None)
++    if layout is None:
++        raise ValueError("learned_anchor_multi_plugin requires pc.res_cond_plugin_layout")
++    alphas = torch.zeros_like(res_cond_anchor)
++    if "ss" in layout:
++        start, end = layout["ss"]
++        # Per-view XRGS condition scalars live on the camera to avoid changing the Scaffold-GS renderer API.
++        ss_alpha = getattr(viewpoint_camera, "ss_res_cond", getattr(viewpoint_camera, "res_cond", 0.0))
++        if torch.is_tensor(ss_alpha):
++            ss_alpha = ss_alpha.to(dtype=features.dtype, device=features.device).reshape(-1)[0]
++        else:
++            ss_alpha = torch.tensor(float(ss_alpha), dtype=features.dtype, device=features.device)
++        alphas[:, start:end] = ss_alpha
++    if "display" in layout:
++        start, end = layout["display"]
++        display_alpha = getattr(viewpoint_camera, "display_res_cond", 0.0)
++        if torch.is_tensor(display_alpha):
++            display_alpha = display_alpha.to(dtype=features.dtype, device=features.device).reshape(-1)[0]
++        else:
++            display_alpha = torch.tensor(float(display_alpha), dtype=features.dtype, device=features.device)
++        alphas[:, start:end] = display_alpha
++    if "lens" in layout:
++        start, end = layout["lens"]
++        anchor = pc.get_anchor[visible_mask]
++        lens_alpha = get_lens_condition_alpha(viewpoint_camera, anchor, features)
++        alphas[:, start:end] = lens_alpha
++    if not torch.any(alphas != 0) and not torch.is_grad_enabled():
++        return None
++    return res_cond_anchor, alphas
++
++def run_res_conditioned_mlp(pc, mlp, proj, features, viewpoint_camera, visible_mask, plugin_condition=None):
++    if not pc.uses_res_cond_plugin():
++        return mlp(features)
++    if plugin_condition is None:
++        return mlp(features)
++    modules = mlp._modules
++    first_layer = modules["0"]
++    res_cond_anchor, res_alpha = plugin_condition
++    combined_features = torch.cat([features, res_alpha * res_cond_anchor], dim=1)
++    combined_weight = torch.cat([first_layer.weight, proj.weight.to(dtype=first_layer.weight.dtype)], dim=1)
++    output = F.linear(combined_features, combined_weight, first_layer.bias)
++    for idx in range(1, len(modules)):
++        output = modules[str(idx)](output)
++    return output
++
+ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask=None, is_training=False):
+     ## view frustum filtering for acceleration    
+     if visible_mask is None:
+@@ -48,6 +162,9 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
+ 
+     cat_local_view = torch.cat([feat, ob_view, ob_dist], dim=1) # [N, c+3+1]
+     cat_local_view_wodist = torch.cat([feat, ob_view], dim=1) # [N, c+3]
++    cat_local_view = append_res_condition(cat_local_view, viewpoint_camera, pc, visible_mask)
++    cat_local_view_wodist = append_res_condition(cat_local_view_wodist, viewpoint_camera, pc, visible_mask)
++    plugin_condition = prepare_res_condition_plugin(pc, viewpoint_camera, cat_local_view_wodist, visible_mask)
+     if pc.appearance_dim > 0:
+         camera_indicies = torch.ones_like(cat_local_view[:,0], dtype=torch.long, device=ob_dist.device) * viewpoint_camera.uid
+         # camera_indicies = torch.ones_like(cat_local_view[:,0], dtype=torch.long, device=ob_dist.device) * 10
+@@ -55,9 +172,13 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
+ 
+     # get offset's opacity
+     if pc.add_opacity_dist:
+-        neural_opacity = pc.get_opacity_mlp(cat_local_view) # [N, k]
++        neural_opacity = run_res_conditioned_mlp(
++            pc, pc.get_opacity_mlp, pc.res_cond_opacity_proj, cat_local_view, viewpoint_camera, visible_mask, plugin_condition
++        ) # [N, k]
+     else:
+-        neural_opacity = pc.get_opacity_mlp(cat_local_view_wodist)
++        neural_opacity = run_res_conditioned_mlp(
++            pc, pc.get_opacity_mlp, pc.res_cond_opacity_proj, cat_local_view_wodist, viewpoint_camera, visible_mask, plugin_condition
++        )
+ 
+     # opacity mask generation
+     neural_opacity = neural_opacity.reshape([-1, 1])
+@@ -70,21 +191,45 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
+     # get offset's color
+     if pc.appearance_dim > 0:
+         if pc.add_color_dist:
+-            color = pc.get_color_mlp(torch.cat([cat_local_view, appearance], dim=1))
++            color = run_res_conditioned_mlp(
++                pc,
++                pc.get_color_mlp,
++                pc.res_cond_color_proj,
++                torch.cat([cat_local_view, appearance], dim=1),
++                viewpoint_camera,
++                visible_mask,
++                plugin_condition,
++            )
+         else:
+-            color = pc.get_color_mlp(torch.cat([cat_local_view_wodist, appearance], dim=1))
++            color = run_res_conditioned_mlp(
++                pc,
++                pc.get_color_mlp,
++                pc.res_cond_color_proj,
++                torch.cat([cat_local_view_wodist, appearance], dim=1),
++                viewpoint_camera,
++                visible_mask,
++                plugin_condition,
++            )
+     else:
+         if pc.add_color_dist:
+-            color = pc.get_color_mlp(cat_local_view)
++            color = run_res_conditioned_mlp(
++                pc, pc.get_color_mlp, pc.res_cond_color_proj, cat_local_view, viewpoint_camera, visible_mask, plugin_condition
++            )
+         else:
+-            color = pc.get_color_mlp(cat_local_view_wodist)
++            color = run_res_conditioned_mlp(
++                pc, pc.get_color_mlp, pc.res_cond_color_proj, cat_local_view_wodist, viewpoint_camera, visible_mask, plugin_condition
++            )
+     color = color.reshape([anchor.shape[0]*pc.n_offsets, 3])# [mask]
+ 
+     # get offset's cov
+     if pc.add_cov_dist:
+-        scale_rot = pc.get_cov_mlp(cat_local_view)
++        scale_rot = run_res_conditioned_mlp(
++            pc, pc.get_cov_mlp, pc.res_cond_cov_proj, cat_local_view, viewpoint_camera, visible_mask, plugin_condition
++        )
+     else:
+-        scale_rot = pc.get_cov_mlp(cat_local_view_wodist)
++        scale_rot = run_res_conditioned_mlp(
++            pc, pc.get_cov_mlp, pc.res_cond_cov_proj, cat_local_view_wodist, viewpoint_camera, visible_mask, plugin_condition
++        )
+     scale_rot = scale_rot.reshape([anchor.shape[0]*pc.n_offsets, 7]) # [mask]
+     
+     # offsets
+@@ -106,7 +251,7 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
+     xyz = repeat_anchor + offsets
+ 
+     if is_training:
+-        return xyz, color, opacity, scaling, rot, neural_opacity, mask
++        return xyz, color, opacity, scaling, rot, neural_opacity, mask, cat_local_view
+     else:
+         return xyz, color, opacity, scaling, rot
+ 
+@@ -119,7 +264,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor,
+     is_training = pc.get_color_mlp.training
+         
+     if is_training:
+-        xyz, color, opacity, scaling, rot, neural_opacity, mask = generate_neural_gaussians(viewpoint_camera, pc, visible_mask, is_training=is_training)
++        xyz, color, opacity, scaling, rot, neural_opacity, mask, _ = generate_neural_gaussians(viewpoint_camera, pc, visible_mask, is_training=is_training)
+     else:
+         xyz, color, opacity, scaling, rot = generate_neural_gaussians(viewpoint_camera, pc, visible_mask, is_training=is_training)
+     
+@@ -133,24 +278,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor,
+             pass
+ 
+ 
+-    # Set up rasterization configuration
+-    tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+-    tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+-
+-    raster_settings = GaussianRasterizationSettings(
+-        image_height=int(viewpoint_camera.image_height),
+-        image_width=int(viewpoint_camera.image_width),
+-        tanfovx=tanfovx,
+-        tanfovy=tanfovy,
+-        bg=bg_color,
+-        scale_modifier=scaling_modifier,
+-        viewmatrix=viewpoint_camera.world_view_transform,
+-        projmatrix=viewpoint_camera.full_proj_transform,
+-        sh_degree=1,
+-        campos=viewpoint_camera.camera_center,
+-        prefiltered=False,
+-        debug=pipe.debug
+-    )
++    raster_settings = make_raster_settings(viewpoint_camera, bg_color, scaling_modifier, pipe)
+ 
+     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+     
+@@ -196,24 +324,7 @@ def prefilter_voxel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch
+     except:
+         pass
+ 
+-    # Set up rasterization configuration
+-    tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+-    tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+-
+-    raster_settings = GaussianRasterizationSettings(
+-        image_height=int(viewpoint_camera.image_height),
+-        image_width=int(viewpoint_camera.image_width),
+-        tanfovx=tanfovx,
+-        tanfovy=tanfovy,
+-        bg=bg_color,
+-        scale_modifier=scaling_modifier,
+-        viewmatrix=viewpoint_camera.world_view_transform,
+-        projmatrix=viewpoint_camera.full_proj_transform,
+-        sh_degree=1,
+-        campos=viewpoint_camera.camera_center,
+-        prefiltered=False,
+-        debug=pipe.debug
+-    )
++    raster_settings = make_raster_settings(viewpoint_camera, bg_color, scaling_modifier, pipe)
+ 
+     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+ 
+diff --git a/scene/dataset_readers.py b/scene/dataset_readers.py
+index 73e7512..ab033af 100755
+--- a/scene/dataset_readers.py
++++ b/scene/dataset_readers.py
+@@ -269,13 +269,13 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
+                 dist = np.array([frame["k1"], frame["k2"], frame["p1"], frame["p2"], frame["k3"]], dtype=np.float32)
+                 im_data = np.array(image.convert("RGB"))
+                 arr = cv2.undistort(im_data / 255.0, mtx, dist, None, mtx)
+-                image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
++                image = Image.fromarray(np.array(arr*255.0, dtype=np.uint8), "RGB")
+             else:
+                 im_data = np.array(image.convert("RGBA"))
+                 bg = np.array([1,1,1]) if white_background else np.array([0, 0, 0])
+                 norm_data = im_data / 255.0
+                 arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+-                image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
++                image = Image.fromarray(np.array(arr*255.0, dtype=np.uint8), "RGB")
+ 
+             if fovx is not None:
+                 fovy = focal2fov(fov2focal(fovx, image.size[0]), image.size[1])
+@@ -332,4 +332,4 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png", ply_pa
+ sceneLoadTypeCallbacks = {
+     "Colmap": readColmapSceneInfo,
+     "Blender": readNerfSyntheticInfo,
+-}
+\ No newline at end of file
++}
+diff --git a/scene/gaussian_model.py b/scene/gaussian_model.py
+index 1d57a5a..00f362b 100755
+--- a/scene/gaussian_model.py
++++ b/scene/gaussian_model.py
+@@ -57,6 +57,8 @@ class GaussianModel:
+                  add_opacity_dist : bool = False,
+                  add_cov_dist : bool = False,
+                  add_color_dist : bool = False,
++                 res_cond_dim : int = 0,
++                 res_cond_mode : str = "scalar",
+                  ):
+ 
+         self.feat_dim = feat_dim
+@@ -73,10 +75,15 @@ class GaussianModel:
+         self.add_opacity_dist = add_opacity_dist
+         self.add_cov_dist = add_cov_dist
+         self.add_color_dist = add_color_dist
++        self.res_cond_dim = int(res_cond_dim)
++        self.res_cond_mode = str(res_cond_mode)
++        self.res_cond_input_dim = self.res_cond_dim if self.uses_res_cond_input() else 0
+ 
+         self._anchor = torch.empty(0)
+         self._offset = torch.empty(0)
+         self._anchor_feat = torch.empty(0)
++        self._anchor_feat_T = torch.empty(0)
++        self._res_cond_anchor = torch.empty(0)
+         
+         self.opacity_accum = torch.empty(0)
+ 
+@@ -105,7 +112,7 @@ class GaussianModel:
+ 
+         self.opacity_dist_dim = 1 if self.add_opacity_dist else 0
+         self.mlp_opacity = nn.Sequential(
+-            nn.Linear(feat_dim+3+self.opacity_dist_dim, feat_dim),
++            nn.Linear(feat_dim+3+self.opacity_dist_dim+self.res_cond_input_dim, feat_dim),
+             nn.ReLU(True),
+             nn.Linear(feat_dim, n_offsets),
+             nn.Tanh()
+@@ -114,19 +121,90 @@ class GaussianModel:
+         self.add_cov_dist = add_cov_dist
+         self.cov_dist_dim = 1 if self.add_cov_dist else 0
+         self.mlp_cov = nn.Sequential(
+-            nn.Linear(feat_dim+3+self.cov_dist_dim, feat_dim),
++            nn.Linear(feat_dim+3+self.cov_dist_dim+self.res_cond_input_dim, feat_dim),
+             nn.ReLU(True),
+             nn.Linear(feat_dim, 7*self.n_offsets),
+         ).cuda()
+ 
+         self.color_dist_dim = 1 if self.add_color_dist else 0
+         self.mlp_color = nn.Sequential(
+-            nn.Linear(feat_dim+3+self.color_dist_dim+self.appearance_dim, feat_dim),
++            nn.Linear(feat_dim+3+self.color_dist_dim+self.appearance_dim+self.res_cond_input_dim, feat_dim),
+             nn.ReLU(True),
+             nn.Linear(feat_dim, 3*self.n_offsets),
+             nn.Sigmoid()
+         ).cuda()
+ 
++        self.res_cond_opacity_proj = None
++        self.res_cond_cov_proj = None
++        self.res_cond_color_proj = None
++        if self.uses_res_cond_plugin():
++            self.res_cond_opacity_proj = nn.Linear(self.res_cond_dim, feat_dim, bias=False).cuda()
++            self.res_cond_cov_proj = nn.Linear(self.res_cond_dim, feat_dim, bias=False).cuda()
++            self.res_cond_color_proj = nn.Linear(self.res_cond_dim, feat_dim, bias=False).cuda()
++            self.reset_res_cond_plugin_parameters()
++
++    def uses_res_cond_input(self):
++        return False
++
++    def uses_res_cond_anchor(self):
++        return self.res_cond_dim > 0 and self.res_cond_mode == "learned_anchor_multi_plugin"
++
++    def uses_res_cond_plugin(self):
++        return self.res_cond_dim > 0 and self.res_cond_mode == "learned_anchor_multi_plugin"
++
++    def freeze_base_for_res_cond_plugin(self):
++        for tensor in [self._anchor, self._offset, self._anchor_feat, self._opacity, self._scaling, self._rotation]:
++            if isinstance(tensor, nn.Parameter):
++                tensor.requires_grad_(False)
++        for module in [
++            self.mlp_opacity,
++            self.mlp_cov,
++            self.mlp_color,
++            self.embedding_appearance,
++        ]:
++            if module is not None:
++                for parameter in module.parameters():
++                    parameter.requires_grad_(False)
++        if self.use_feat_bank:
++            for parameter in self.mlp_feature_bank.parameters():
++                parameter.requires_grad_(False)
++
++    def res_cond_plugin_state_dict(self):
++        if not self.uses_res_cond_plugin():
++            return {}
++        return {
++            "opacity_proj": self.res_cond_opacity_proj.state_dict(),
++            "cov_proj": self.res_cond_cov_proj.state_dict(),
++            "color_proj": self.res_cond_color_proj.state_dict(),
++        }
++
++    def load_res_cond_plugin_state_dict(self, state_dict):
++        if not self.uses_res_cond_plugin():
++            return
++        self.res_cond_opacity_proj.load_state_dict(state_dict["opacity_proj"])
++        self.res_cond_cov_proj.load_state_dict(state_dict["cov_proj"])
++        self.res_cond_color_proj.load_state_dict(state_dict["color_proj"])
++
++    def reset_res_cond_plugin_parameters(self, projection_std=0.02):
++        """Reset unified plug-in parameters to the audited clean initialization.
++
++        Endpoint vectors start at zero so a clean run initially reproduces the
++        frozen base renderer. Projection matrices are bias-free and use a small
++        truncated Gaussian initialization for the first-layer injection.
++        """
++        if not self.uses_res_cond_plugin():
++            return
++        with torch.no_grad():
++            if isinstance(self._res_cond_anchor, nn.Parameter) and self._res_cond_anchor.numel() > 0:
++                self._res_cond_anchor.zero_()
++            for proj in [self.res_cond_opacity_proj, self.res_cond_cov_proj, self.res_cond_color_proj]:
++                nn.init.trunc_normal_(
++                    proj.weight,
++                    mean=0.0,
++                    std=float(projection_std),
++                    a=-2.0 * float(projection_std),
++                    b=2.0 * float(projection_std),
++                )
+ 
+     def eval(self):
+         self.mlp_opacity.eval()
+@@ -136,6 +214,10 @@ class GaussianModel:
+             self.embedding_appearance.eval()
+         if self.use_feat_bank:
+             self.mlp_feature_bank.eval()
++        if self.uses_res_cond_plugin():
++            self.res_cond_opacity_proj.eval()
++            self.res_cond_cov_proj.eval()
++            self.res_cond_color_proj.eval()
+ 
+     def train(self):
+         self.mlp_opacity.train()
+@@ -145,6 +227,10 @@ class GaussianModel:
+             self.embedding_appearance.train()
+         if self.use_feat_bank:                   
+             self.mlp_feature_bank.train()
++        if self.uses_res_cond_plugin():
++            self.res_cond_opacity_proj.train()
++            self.res_cond_cov_proj.train()
++            self.res_cond_color_proj.train()
+ 
+     def capture(self):
+         return (
+@@ -203,7 +289,7 @@ class GaussianModel:
+     @property
+     def get_color_mlp(self):
+         return self.mlp_color
+-    
++
+     @property
+     def get_rotation(self):
+         return self.rotation_activation(self._rotation)
+@@ -266,6 +352,9 @@ class GaussianModel:
+         self._anchor = nn.Parameter(fused_point_cloud.requires_grad_(True))
+         self._offset = nn.Parameter(offsets.requires_grad_(True))
+         self._anchor_feat = nn.Parameter(anchors_feat.requires_grad_(True))
++        if self.uses_res_cond_anchor():
++            res_cond_anchor = torch.zeros((fused_point_cloud.shape[0], self.res_cond_dim), device="cuda")
++            self._res_cond_anchor = nn.Parameter(res_cond_anchor.requires_grad_(True))
+         self._scaling = nn.Parameter(scales.requires_grad_(True))
+         self._rotation = nn.Parameter(rots.requires_grad_(False))
+         self._opacity = nn.Parameter(opacities.requires_grad_(False))
+@@ -281,6 +370,57 @@ class GaussianModel:
+         self.offset_denom = torch.zeros((self.get_anchor.shape[0]*self.n_offsets, 1), device="cuda")
+         self.anchor_demon = torch.zeros((self.get_anchor.shape[0], 1), device="cuda")
+ 
++        if self.uses_res_cond_plugin():
++            if not isinstance(self._res_cond_anchor, nn.Parameter) or self._res_cond_anchor.numel() == 0:
++                self._res_cond_anchor = nn.Parameter(
++                    torch.zeros((self.get_anchor.shape[0], self.res_cond_dim), device="cuda").requires_grad_(True)
++                )
++            self.freeze_base_for_res_cond_plugin()
++            l = [
++                {
++                    'params': [self._res_cond_anchor],
++                    'lr': getattr(training_args, "res_cond_lr", training_args.feature_lr),
++                    "name": "res_cond_anchor",
++                },
++                {
++                    'params': self.res_cond_opacity_proj.parameters(),
++                    'lr': getattr(training_args, "res_cond_lr", training_args.feature_lr),
++                    "name": "res_cond_opacity_proj",
++                },
++                {
++                    'params': self.res_cond_cov_proj.parameters(),
++                    'lr': getattr(training_args, "res_cond_lr", training_args.feature_lr),
++                    "name": "res_cond_cov_proj",
++                },
++                {
++                    'params': self.res_cond_color_proj.parameters(),
++                    'lr': getattr(training_args, "res_cond_lr", training_args.feature_lr),
++                    "name": "res_cond_color_proj",
++                },
++            ]
++            self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
++            self.anchor_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
++                                                        lr_final=training_args.position_lr_final*self.spatial_lr_scale,
++                                                        lr_delay_mult=training_args.position_lr_delay_mult,
++                                                        max_steps=training_args.position_lr_max_steps)
++            self.offset_scheduler_args = get_expon_lr_func(lr_init=training_args.offset_lr_init*self.spatial_lr_scale,
++                                                        lr_final=training_args.offset_lr_final*self.spatial_lr_scale,
++                                                        lr_delay_mult=training_args.offset_lr_delay_mult,
++                                                        max_steps=training_args.offset_lr_max_steps)
++            self.mlp_opacity_scheduler_args = get_expon_lr_func(lr_init=training_args.mlp_opacity_lr_init,
++                                                        lr_final=training_args.mlp_opacity_lr_final,
++                                                        lr_delay_mult=training_args.mlp_opacity_lr_delay_mult,
++                                                        max_steps=training_args.mlp_opacity_lr_max_steps)
++            self.mlp_cov_scheduler_args = get_expon_lr_func(lr_init=training_args.mlp_cov_lr_init,
++                                                        lr_final=training_args.mlp_cov_lr_final,
++                                                        lr_delay_mult=training_args.mlp_cov_lr_delay_mult,
++                                                        max_steps=training_args.mlp_cov_lr_max_steps)
++            self.mlp_color_scheduler_args = get_expon_lr_func(lr_init=training_args.mlp_color_lr_init,
++                                                        lr_final=training_args.mlp_color_lr_final,
++                                                        lr_delay_mult=training_args.mlp_color_lr_delay_mult,
++                                                        max_steps=training_args.mlp_color_lr_max_steps)
++            return
++
+         
+         
+         if self.use_feat_bank:
+@@ -393,6 +533,9 @@ class GaussianModel:
+             l.append('f_offset_{}'.format(i))
+         for i in range(self._anchor_feat.shape[1]):
+             l.append('f_anchor_feat_{}'.format(i))
++        if self.uses_res_cond_anchor():
++            for i in range(self.res_cond_dim):
++                l.append('f_res_cond_anchor_{}'.format(i))
+         l.append('opacity')
+         for i in range(self._scaling.shape[1]):
+             l.append('scale_{}'.format(i))
+@@ -406,6 +549,10 @@ class GaussianModel:
+         anchor = self._anchor.detach().cpu().numpy()
+         normals = np.zeros_like(anchor)
+         anchor_feat = self._anchor_feat.detach().cpu().numpy()
++        if self.uses_res_cond_anchor():
++            res_cond_anchor = self._res_cond_anchor.detach().cpu().numpy()
++        else:
++            res_cond_anchor = np.empty((anchor.shape[0], 0), dtype=np.float32)
+         offset = self._offset.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+         opacities = self._opacity.detach().cpu().numpy()
+         scale = self._scaling.detach().cpu().numpy()
+@@ -414,7 +561,7 @@ class GaussianModel:
+         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
+ 
+         elements = np.empty(anchor.shape[0], dtype=dtype_full)
+-        attributes = np.concatenate((anchor, normals, offset, anchor_feat, opacities, scale, rotation), axis=1)
++        attributes = np.concatenate((anchor, normals, offset, anchor_feat, res_cond_anchor, opacities, scale, rotation), axis=1)
+         elements[:] = list(map(tuple, attributes))
+         el = PlyElement.describe(elements, 'vertex')
+         PlyData([el]).write(path)
+@@ -446,6 +593,15 @@ class GaussianModel:
+         for idx, attr_name in enumerate(anchor_feat_names):
+             anchor_feats[:, idx] = np.asarray(plydata.elements[0][attr_name]).astype(np.float32)
+ 
++        res_cond_anchor_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_res_cond_anchor")]
++        res_cond_anchor_names = sorted(res_cond_anchor_names, key = lambda x: int(x.split('_')[-1]))
++        if self.uses_res_cond_anchor():
++            res_cond_anchors = np.zeros((anchor.shape[0], self.res_cond_dim), dtype=np.float32)
++            for idx, attr_name in enumerate(res_cond_anchor_names[:self.res_cond_dim]):
++                res_cond_anchors[:, idx] = np.asarray(plydata.elements[0][attr_name]).astype(np.float32)
++        else:
++            res_cond_anchors = np.zeros((anchor.shape[0], 0), dtype=np.float32)
++
+         offset_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_offset")]
+         offset_names = sorted(offset_names, key = lambda x: int(x.split('_')[-1]))
+         offsets = np.zeros((anchor.shape[0], len(offset_names)))
+@@ -454,6 +610,8 @@ class GaussianModel:
+         offsets = offsets.reshape((offsets.shape[0], 3, -1))
+         
+         self._anchor_feat = nn.Parameter(torch.tensor(anchor_feats, dtype=torch.float, device="cuda").requires_grad_(True))
++        if self.uses_res_cond_anchor():
++            self._res_cond_anchor = nn.Parameter(torch.tensor(res_cond_anchors, dtype=torch.float, device="cuda").requires_grad_(True))
+ 
+         self._offset = nn.Parameter(torch.tensor(offsets, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
+         self._anchor = nn.Parameter(torch.tensor(anchor, dtype=torch.float, device="cuda").requires_grad_(True))
+@@ -574,6 +732,8 @@ class GaussianModel:
+         self._anchor = optimizable_tensors["anchor"]
+         self._offset = optimizable_tensors["offset"]
+         self._anchor_feat = optimizable_tensors["anchor_feat"]
++        if self.uses_res_cond_anchor():
++            self._res_cond_anchor = optimizable_tensors["res_cond_anchor"]
+         self._opacity = optimizable_tensors["opacity"]
+         self._scaling = optimizable_tensors["scaling"]
+         self._rotation = optimizable_tensors["rotation"]
+@@ -645,6 +805,9 @@ class GaussianModel:
+                 new_feat = self._anchor_feat.unsqueeze(dim=1).repeat([1, self.n_offsets, 1]).view([-1, self.feat_dim])[candidate_mask]
+ 
+                 new_feat = scatter_max(new_feat, inverse_indices.unsqueeze(1).expand(-1, new_feat.size(1)), dim=0)[0][remove_duplicates]
++                if self.uses_res_cond_anchor():
++                    new_res_cond = self._res_cond_anchor.unsqueeze(dim=1).repeat([1, self.n_offsets, 1]).view([-1, self.res_cond_dim])[candidate_mask]
++                    new_res_cond = scatter_max(new_res_cond, inverse_indices.unsqueeze(1).expand(-1, new_res_cond.size(1)), dim=0)[0][remove_duplicates]
+ 
+                 new_offsets = torch.zeros_like(candidate_anchor).unsqueeze(dim=1).repeat([1,self.n_offsets,1]).float().cuda()
+ 
+@@ -656,6 +819,8 @@ class GaussianModel:
+                     "offset": new_offsets,
+                     "opacity": new_opacities,
+                 }
++                if self.uses_res_cond_anchor():
++                    d["res_cond_anchor"] = new_res_cond
+                 
+ 
+                 temp_anchor_demon = torch.cat([self.anchor_demon, torch.zeros([new_opacities.shape[0], 1], device='cuda').float()], dim=0)
+@@ -673,6 +838,8 @@ class GaussianModel:
+                 self._scaling = optimizable_tensors["scaling"]
+                 self._rotation = optimizable_tensors["rotation"]
+                 self._anchor_feat = optimizable_tensors["anchor_feat"]
++                if self.uses_res_cond_anchor():
++                    self._res_cond_anchor = optimizable_tensors["res_cond_anchor"]
+                 self._offset = optimizable_tensors["offset"]
+                 self._opacity = optimizable_tensors["opacity"]
+                 
+@@ -738,17 +905,17 @@ class GaussianModel:
+         mkdir_p(os.path.dirname(path))
+         if mode == 'split':
+             self.mlp_opacity.eval()
+-            opacity_mlp = torch.jit.trace(self.mlp_opacity, (torch.rand(1, self.feat_dim+3+self.opacity_dist_dim).cuda()))
++            opacity_mlp = torch.jit.trace(self.mlp_opacity, (torch.rand(1, self.feat_dim+3+self.opacity_dist_dim+self.res_cond_input_dim).cuda()))
+             opacity_mlp.save(os.path.join(path, 'opacity_mlp.pt'))
+             self.mlp_opacity.train()
+ 
+             self.mlp_cov.eval()
+-            cov_mlp = torch.jit.trace(self.mlp_cov, (torch.rand(1, self.feat_dim+3+self.cov_dist_dim).cuda()))
++            cov_mlp = torch.jit.trace(self.mlp_cov, (torch.rand(1, self.feat_dim+3+self.cov_dist_dim+self.res_cond_input_dim).cuda()))
+             cov_mlp.save(os.path.join(path, 'cov_mlp.pt'))
+             self.mlp_cov.train()
+ 
+             self.mlp_color.eval()
+-            color_mlp = torch.jit.trace(self.mlp_color, (torch.rand(1, self.feat_dim+3+self.color_dist_dim+self.appearance_dim).cuda()))
++            color_mlp = torch.jit.trace(self.mlp_color, (torch.rand(1, self.feat_dim+3+self.color_dist_dim+self.appearance_dim+self.res_cond_input_dim).cuda()))
+             color_mlp.save(os.path.join(path, 'color_mlp.pt'))
+             self.mlp_color.train()
+ 
+@@ -764,6 +931,9 @@ class GaussianModel:
+                 emd.save(os.path.join(path, 'embedding_appearance.pt'))
+                 self.embedding_appearance.train()
+ 
++            if self.uses_res_cond_plugin():
++                torch.save(self.res_cond_plugin_state_dict(), os.path.join(path, 'res_cond_plugin.pth'))
++
+         elif mode == 'unite':
+             if self.use_feat_bank:
+                 torch.save({
+@@ -790,7 +960,7 @@ class GaussianModel:
+             raise NotImplementedError
+ 
+ 
+-    def load_mlp_checkpoints(self, path, mode = 'split'):#split or unite
++    def load_mlp_checkpoints(self, path, mode = 'split', strict_res_cond_plugin = False):#split or unite
+         if mode == 'split':
+             self.mlp_opacity = torch.jit.load(os.path.join(path, 'opacity_mlp.pt')).cuda()
+             self.mlp_cov = torch.jit.load(os.path.join(path, 'cov_mlp.pt')).cuda()
+@@ -799,6 +969,12 @@ class GaussianModel:
+                 self.mlp_feature_bank = torch.jit.load(os.path.join(path, 'feature_bank_mlp.pt')).cuda()
+             if self.appearance_dim > 0:
+                 self.embedding_appearance = torch.jit.load(os.path.join(path, 'embedding_appearance.pt')).cuda()
++            plugin_path = os.path.join(path, 'res_cond_plugin.pth')
++            if self.uses_res_cond_plugin():
++                if os.path.exists(plugin_path):
++                    self.load_res_cond_plugin_state_dict(torch.load(plugin_path, map_location="cuda"))
++                elif strict_res_cond_plugin:
++                    raise FileNotFoundError(f"Missing unified plug-in projection checkpoint: {plugin_path}")
+         elif mode == 'unite':
+             checkpoint = torch.load(os.path.join(path, 'checkpoints.pth'))
+             self.mlp_opacity.load_state_dict(checkpoint['opacity_mlp'])
+diff --git a/utils/camera_utils.py b/utils/camera_utils.py
+index 8ce8523..c8f3161 100755
+--- a/utils/camera_utils.py
++++ b/utils/camera_utils.py
+@@ -11,8 +11,9 @@
+ 
+ from scene.cameras import Camera
+ import numpy as np
+-from utils.general_utils import PILtoTorch
++from utils.general_utils import PILtoTorch, PILtoTorchArea
+ from utils.graphics_utils import fov2focal
++import math
+ 
+ WARNED = False
+ 
+@@ -20,6 +21,7 @@ def loadCam(args, id, cam_info, resolution_scale):
+     orig_w, orig_h = cam_info.image.size
+ 
+     if args.resolution in [1, 2, 4, 8]:
++        global_down = float(args.resolution)
+         resolution = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
+     else:  # should be a type that converts to float
+         if args.resolution == -1:
+@@ -38,7 +40,13 @@ def loadCam(args, id, cam_info, resolution_scale):
+         scale = float(global_down) * float(resolution_scale)
+         resolution = (int(orig_w / scale), int(orig_h / scale))
+ 
+-    resized_image_rgb = PILtoTorch(cam_info.image, resolution)
++    gt_downsample_mode = getattr(args, "gt_downsample_mode", "pil")
++    if gt_downsample_mode == "area":
++        resized_image_rgb = PILtoTorchArea(cam_info.image, resolution)
++    elif gt_downsample_mode == "pil":
++        resized_image_rgb = PILtoTorch(cam_info.image, resolution)
++    else:
++        raise ValueError(f"Unsupported gt_downsample_mode: {gt_downsample_mode}")
+ 
+     gt_image = resized_image_rgb[:3, ...]
+     loaded_mask = None
+@@ -47,10 +55,16 @@ def loadCam(args, id, cam_info, resolution_scale):
+     if resized_image_rgb.shape[1] == 4:
+         loaded_mask = resized_image_rgb[3:4, ...]
+ 
+-    return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
+-                  FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
+-                  image=gt_image, gt_alpha_mask=loaded_mask,
+-                  image_name=cam_info.image_name, uid=id, data_device=args.data_device)
++    camera = Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
++                    FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
++                    image=gt_image, gt_alpha_mask=loaded_mask,
++                    image_name=cam_info.image_name, uid=id, data_device=args.data_device)
++    downscale = float(global_down) * float(resolution_scale)
++    max_scale = max(float(getattr(args, "res_cond_scale_max", 8.0)), 1.000001)
++    camera.resolution_scale = float(resolution_scale)
++    camera.resolution_downscale = downscale
++    camera.res_cond = math.log(max(downscale, 1.0), 2.0) / math.log(max_scale, 2.0)
++    return camera
+ 
+ def cameraList_from_camInfos(cam_infos, resolution_scale, args):
+     camera_list = []
+@@ -81,5 +95,3 @@ def camera_to_JSON(id, camera : Camera):
+         'fx' : fov2focal(camera.FovX, camera.width)
+     }
+     return camera_entry
+-
+-
+diff --git a/utils/general_utils.py b/utils/general_utils.py
+index 195ad31..464787d 100755
+--- a/utils/general_utils.py
++++ b/utils/general_utils.py
+@@ -10,6 +10,7 @@
+ #
+ 
+ import torch
++import torch.nn.functional as F
+ import sys
+ from datetime import datetime
+ import numpy as np
+@@ -26,6 +27,21 @@ def PILtoTorch(pil_image, resolution):
+     else:
+         return resized_image.unsqueeze(dim=-1).permute(2, 0, 1)
+ 
++def PILtoTorchArea(pil_image, resolution):
++    image = torch.from_numpy(np.array(pil_image)) / 255.0
++    if len(image.shape) == 3:
++        image = image.permute(2, 0, 1)
++    else:
++        image = image.unsqueeze(dim=-1).permute(2, 0, 1)
++    target_w, target_h = resolution
++    if image.shape[2] == target_w and image.shape[1] == target_h:
++        return image
++    return F.interpolate(
++        image.unsqueeze(0),
++        size=(target_h, target_w),
++        mode="area",
++    ).squeeze(0)
++
+ def get_expon_lr_func(
+     lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000
+ ):
+@@ -130,4 +146,4 @@ def safe_state(silent):
+     random.seed(0)
+     np.random.seed(0)
+     torch.manual_seed(0)
+-    torch.cuda.set_device(torch.device("cuda:0"))
+\ No newline at end of file
++    torch.cuda.set_device(torch.device("cuda:0"))

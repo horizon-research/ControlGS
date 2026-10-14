@@ -1,0 +1,189 @@
+{
+  "version": 1,
+  "backbone": "scaffold_gs",
+  "scenes": [
+    "stump",
+    "materials"
+  ],
+  "selected_checkpoint_suite": "condition_injection_lpips_native_gt_b200_correct_process",
+  "iteration": 30000,
+  "files": [
+    {
+      "path": "models/mip360/stump/backbone/point_cloud/iteration_30000/cov_mlp.pt",
+      "bytes": 21533,
+      "sha256": "ce43b02bd036a81a8570ac20a84930caf850fa20889b49eadf35d76b94cb90ba",
+      "role": "backbone",
+      "dataset": "mip360",
+      "scene": "stump"
+    },
+    {
+      "path": "models/mip360/stump/backbone/point_cloud/iteration_30000/opacity_mlp.pt",
+      "bytes": 13757,
+      "sha256": "0d0fb80475b716c2160a7f9b3145a368f8dd889601b5acfde9c781f44d5d45b6",
+      "role": "backbone",
+      "dataset": "mip360",
+      "scene": "stump"
+    },
+    {
+      "path": "models/mip360/stump/backbone/point_cloud/iteration_30000/point_cloud.ply",
+      "bytes": 260873189,
+      "sha256": "6a14aa83b86a29a609f3ed780c44be1c6a86e75ad5b8742eea3d9ab278a6de7b",
+      "role": "backbone",
+      "dataset": "mip360",
+      "scene": "stump"
+    },
+    {
+      "path": "models/mip360/stump/backbone/point_cloud/iteration_30000/color_mlp.pt",
+      "bytes": 17759,
+      "sha256": "f5b2f93291d59b169516cb15f888d22fe7b5c67e2bbae69da0f3eac6a947ca5a",
+      "role": "backbone",
+      "dataset": "mip360",
+      "scene": "stump"
+    },
+    {
+      "path": "models/mip360/stump/unified/point_cloud/iteration_30000/cov_mlp.pt",
+      "bytes": 21009,
+      "sha256": "ec660e82efd9feaed2747608c97e6da7455e40d4801d6b9955085dbb7135213b",
+      "role": "unified",
+      "dataset": "mip360",
+      "scene": "stump"
+    },
+    {
+      "path": "models/mip360/stump/unified/point_cloud/iteration_30000/opacity_mlp.pt",
+      "bytes": 13225,
+      "sha256": "744fffb56e36064d063b8290e028335069b4654d449be1849455e14a9d1b8d00",
+      "role": "unified",
+      "dataset": "mip360",
+      "scene": "stump"
+    },
+    {
+      "path": "models/mip360/stump/unified/point_cloud/iteration_30000/point_cloud.ply",
+      "bytes": 340125979,
+      "sha256": "f62bab6ed213e4647b18470a7bc4a4382373a2e8c9c33d52459c9b761abbe990",
+      "role": "unified",
+      "dataset": "mip360",
+      "scene": "stump"
+    },
+    {
+      "path": "models/mip360/stump/unified/point_cloud/iteration_30000/res_cond_plugin.pth",
+      "bytes": 11561,
+      "sha256": "7af4665020188b9ae494b911dc6aa39f92e688f0ad7ac94b57e6737cfb571704",
+      "role": "unified",
+      "dataset": "mip360",
+      "scene": "stump"
+    },
+    {
+      "path": "models/mip360/stump/unified/point_cloud/iteration_30000/color_mlp.pt",
+      "bytes": 17231,
+      "sha256": "0be0a2b4050288adc53e2da359667278a9f8573332856db9e1b3925c27eccabf",
+      "role": "unified",
+      "dataset": "mip360",
+      "scene": "stump"
+    },
+    {
+      "path": "models/mip360/stump/baseline/distort_mlp.pth",
+      "bytes": 38725,
+      "sha256": "8530dec4b54183f08fb7352ae92b880dcb919e7426afbf3f519a07df2f44626c",
+      "role": "baseline",
+      "dataset": "mip360",
+      "scene": "stump"
+    },
+    {
+      "path": "models/mip360/stump/reference_distort/distort_mlp.pth",
+      "bytes": 38725,
+      "sha256": "2c549bfbb7938429e9fd3aa6c5a1d7783035aa79810a8b0cc7e84b1d503222d3",
+      "role": "reference_distort",
+      "dataset": "mip360",
+      "scene": "stump"
+    },
+    {
+      "path": "models/nerf_synthetic/materials/backbone/point_cloud/iteration_30000/cov_mlp.pt",
+      "bytes": 21533,
+      "sha256": "53fd89f2ba8ede89ab862c08260e97de84590d795ae4c1b80fa65112833a28f3",
+      "role": "backbone",
+      "dataset": "nerf_synthetic",
+      "scene": "materials"
+    },
+    {
+      "path": "models/nerf_synthetic/materials/backbone/point_cloud/iteration_30000/opacity_mlp.pt",
+      "bytes": 13757,
+      "sha256": "19b5ea07f89d96a62c6a01d6775bd1a6adef03ceb5cb00aa188584c15f1fb50c",
+      "role": "backbone",
+      "dataset": "nerf_synthetic",
+      "scene": "materials"
+    },
+    {
+      "path": "models/nerf_synthetic/materials/backbone/point_cloud/iteration_30000/point_cloud.ply",
+      "bytes": 19743384,
+      "sha256": "97f68cb5b2b3a328f7c8555bf214c6146bd9f8cf19e3023199ff220e7a29bc41",
+      "role": "backbone",
+      "dataset": "nerf_synthetic",
+      "scene": "materials"
+    },
+    {
+      "path": "models/nerf_synthetic/materials/backbone/point_cloud/iteration_30000/color_mlp.pt",
+      "bytes": 17759,
+      "sha256": "168f555ccb6d49cb0e5f76d71be51efa314d45928674c5b26ae1be4d719713d6",
+      "role": "backbone",
+      "dataset": "nerf_synthetic",
+      "scene": "materials"
+    },
+    {
+      "path": "models/nerf_synthetic/materials/unified/point_cloud/iteration_30000/cov_mlp.pt",
+      "bytes": 21009,
+      "sha256": "d7fa7bcd4c2bc4f1a72c5a76eca661a13478814799d5217929c3316c9f36959a",
+      "role": "unified",
+      "dataset": "nerf_synthetic",
+      "scene": "materials"
+    },
+    {
+      "path": "models/nerf_synthetic/materials/unified/point_cloud/iteration_30000/opacity_mlp.pt",
+      "bytes": 13225,
+      "sha256": "fd65e3ac02ae4a3bebc8a7254c8e3113e4eb343ee690c7a718ab15cfcd4118ef",
+      "role": "unified",
+      "dataset": "nerf_synthetic",
+      "scene": "materials"
+    },
+    {
+      "path": "models/nerf_synthetic/materials/unified/point_cloud/iteration_30000/point_cloud.ply",
+      "bytes": 25741550,
+      "sha256": "aa523aca813780bcf3877c98bf2c32815d4ea16b24794ea730c2fb1d600ee59d",
+      "role": "unified",
+      "dataset": "nerf_synthetic",
+      "scene": "materials"
+    },
+    {
+      "path": "models/nerf_synthetic/materials/unified/point_cloud/iteration_30000/res_cond_plugin.pth",
+      "bytes": 11561,
+      "sha256": "f87fa5d109005a92b0a00c4262a6f640f3d9992fb5ff7c168ea8f27eb028c13b",
+      "role": "unified",
+      "dataset": "nerf_synthetic",
+      "scene": "materials"
+    },
+    {
+      "path": "models/nerf_synthetic/materials/unified/point_cloud/iteration_30000/color_mlp.pt",
+      "bytes": 17231,
+      "sha256": "c3aa62d6170bc8c7b7c85cd1cf1092bdf122eacc18115c83f299b556c67c4319",
+      "role": "unified",
+      "dataset": "nerf_synthetic",
+      "scene": "materials"
+    },
+    {
+      "path": "models/nerf_synthetic/materials/baseline/distort_mlp.pth",
+      "bytes": 38725,
+      "sha256": "ab7f46e34a1c2a9e6877236a1bc96e8be2e2a4a40401fb03cce833b2310398b0",
+      "role": "baseline",
+      "dataset": "nerf_synthetic",
+      "scene": "materials"
+    },
+    {
+      "path": "models/nerf_synthetic/materials/reference_distort/distort_mlp.pth",
+      "bytes": 38725,
+      "sha256": "65bfb731a100cf253f3884b5ace4f04f16576d32ef6bd392da3d62b4c821ac78",
+      "role": "reference_distort",
+      "dataset": "nerf_synthetic",
+      "scene": "materials"
+    }
+  ],
+  "canonical_reference_note": "reference_distort contains only the small per-scene 3DGS DistortMLP needed to preserve evaluation reference power; no 3DGS renderer/checkpoint is included."
+}

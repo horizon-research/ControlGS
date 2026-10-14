@@ -1,0 +1,35 @@
+{
+  "version": "2026-10-14",
+  "files": [
+    {
+      "path": "tools/zemax/LENS_ASSET_README.txt",
+      "bytes": 864,
+      "sha256": "3d4cedc741b38b3349dc791c54132284c03d4712ad6451dd8402b15e607cdc7f"
+    },
+    {
+      "path": "tools/zemax/config_example.json",
+      "bytes": 716,
+      "sha256": "1cf2227644f9d3c663e06010e173de9d40c889f5670b9fb720098c22474ec372"
+    },
+    {
+      "path": "tools/zemax/google_cardboard_rgb.ZDA",
+      "bytes": 29080,
+      "sha256": "f4e21ca4413e5a9b2e42c67b6ed94dddfb994a6ef186973da1b4d4dfc60c550d"
+    },
+    {
+      "path": "tools/zemax/google_cardboard_rgb.ZMX",
+      "bytes": 11288,
+      "sha256": "f2e9de3bfb971b2d6559e67ee167983e9867b7f676364094164eddaf28714ee6"
+    },
+    {
+      "path": "tools/zemax/google_cardboard_rgb.zar",
+      "bytes": 103928,
+      "sha256": "a31d2ac202f80e759ea60b18853ed3074475be3c6516c5ffbec97da7ccd0459a"
+    },
+    {
+      "path": "tools/zemax/psf_extraction.py",
+      "bytes": 22270,
+      "sha256": "0d411058e6df857167ae54a94bd21b87a19ead34f4d65c3d01d50e5f9f279d90"
+    }
+  ]
+}
